@@ -1,0 +1,63 @@
+# Compiled files
+*.o
+*.a
+*.so
+libklt.a
+libklt_prof.a
+
+# Executables
+example1
+example2
+example3
+example4
+example5
+*_prof
+
+# Profiling outputs
+gmon.out
+profile*.txt
+*.prof
+
+# CUDA files
+*.ptx
+*.cubin
+*.fatbin
+
+# Output files
+feat*.ppm
+feat*.txt
+feat*.fl
+features.ft
+features.txt
+output_*.pgm
+output_*.ppm
+
+# Windows/Visual Studio files (from your listing)
+*.ncb
+*.suo
+*.user
+*.sln
+*.vcproj
+*.dsp
+*.dsw
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+
+# Temporary
+*.tmp
+
+# Submission files
+*.zip
+*.tar
+*.tar.gz
+
+# Documentation build outputs (if any)
+doc/html/
+doc/latex/
+
