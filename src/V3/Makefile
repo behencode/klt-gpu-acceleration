@@ -128,3 +128,10 @@ profile: example3_prof
 clean-profile:
 	rm -f gmon.out profile*.txt example3_prof libklt_prof.a
 
+# Add gpu_context to GPU objects
+GPU_ARCH_OBJS = $(ARCH:.c=.gpu.o) gpu_context.o
+
+
+# Add cleanup target
+clean:
+	rm -f *.o *.a $(EXAMPLES:.c=) $(GPU_EXAMPLES) *.tar *.tar.gz

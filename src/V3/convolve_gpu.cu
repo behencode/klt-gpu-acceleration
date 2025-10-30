@@ -19,119 +19,165 @@ static dim3 makeGrid2d(int ncols, int nrows, dim3 block)
 {
   return dim3((ncols + block.x - 1) / block.x, (nrows + block.y - 1) / block.y);
 }
+#define BLOCK_DIM 16
+#define TILE_WIDTH 16
 
-__global__ void convolveHorizontalKernel(const float *imgin,
-                                         float *imgtmp,
-                                         const float *kernel,
-                                         int kernelWidth,
-                                         int ncols,
-                                         int nrows)
+// Optimized horizontal convolution with shared memory
+__global__ void convolveHorizontalKernelOptimized(
+    const float *imgin,
+    float *imgtmp,
+    const float *kernel,
+    int kernelWidth,
+    int ncols,
+    int nrows)
 {
-  const int col = blockIdx.x * blockDim.x + threadIdx.x;
-  const int row = blockIdx.y * blockDim.y + threadIdx.y;
-  if (col >= ncols || row >= nrows) return;
-
-  const int radius = kernelWidth / 2;
-  const int idx = row * ncols + col;
-
-  if (col < radius || col >= ncols - radius) {
-    imgtmp[idx] = 0.0f;
-    return;
-  }
-
-  const int base = row * ncols;
-  float sum = 0.0f;
-  for (int k = -radius; k <= radius; ++k) {
-    sum += imgin[base + col + k] * kernel[radius + k];
-  }
-  imgtmp[idx] = sum;
+    __shared__ float s_data[BLOCK_DIM][BLOCK_DIM + 70]; // 70 = max kernel radius * 2
+    
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    const int radius = kernelWidth / 2;
+    
+    // Load data into shared memory with halo
+    if (row < nrows) {
+        int sharedCol = threadIdx.x + radius;
+        
+        // Load main data
+        if (col < ncols) {
+            s_data[threadIdx.y][sharedCol] = imgin[row * ncols + col];
+        }
+        
+        // Load left halo
+        if (threadIdx.x < radius && col >= radius) {
+            s_data[threadIdx.y][threadIdx.x] = imgin[row * ncols + col - radius];
+        }
+        
+        // Load right halo
+        if (threadIdx.x < radius && col + BLOCK_DIM < ncols) {
+            s_data[threadIdx.y][sharedCol + BLOCK_DIM] = imgin[row * ncols + col + BLOCK_DIM];
+        }
+    }
+    
+    __syncthreads();
+    
+    // Compute convolution
+    if (col >= ncols || row >= nrows) return;
+    
+    const int idx = row * ncols + col;
+    
+    if (col < radius || col >= ncols - radius) {
+        imgtmp[idx] = 0.0f;
+        return;
+    }
+    
+    float sum = 0.0f;
+    #pragma unroll
+    for (int k = -radius; k <= radius; ++k) {
+        sum += s_data[threadIdx.y][threadIdx.x + radius + k] * kernel[radius + k];
+    }
+    
+    imgtmp[idx] = sum;
 }
 
-__global__ void convolveVerticalKernel(const float *imgtmp,
-                                       float *imgout,
-                                       const float *kernel,
-                                       int kernelWidth,
-                                       int ncols,
-                                       int nrows)
+// Optimized vertical convolution with shared memory
+__global__ void convolveVerticalKernelOptimized(
+    const float *imgtmp,
+    float *imgout,
+    const float *kernel,
+    int kernelWidth,
+    int ncols,
+    int nrows)
 {
-  const int col = blockIdx.x * blockDim.x + threadIdx.x;
-  const int row = blockIdx.y * blockDim.y + threadIdx.y;
-  if (col >= ncols || row >= nrows) return;
-
-  const int radius = kernelWidth / 2;
-  const int idx = row * ncols + col;
-
-  if (row < radius || row >= nrows - radius) {
-    imgout[idx] = 0.0f;
-    return;
-  }
-
-  float sum = 0.0f;
-  for (int k = -radius; k <= radius; ++k) {
-    const int offset = (row + k) * ncols + col;
-    sum += imgtmp[offset] * kernel[radius + k];
-  }
-  imgout[idx] = sum;
+    __shared__ float s_data[BLOCK_DIM + 70][BLOCK_DIM]; // 70 = max kernel radius * 2
+    
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    const int radius = kernelWidth / 2;
+    
+    // Load data into shared memory with halo
+    if (col < ncols) {
+        int sharedRow = threadIdx.y + radius;
+        
+        // Load main data
+        if (row < nrows) {
+            s_data[sharedRow][threadIdx.x] = imgtmp[row * ncols + col];
+        }
+        
+        // Load top halo
+        if (threadIdx.y < radius && row >= radius) {
+            s_data[threadIdx.y][threadIdx.x] = imgtmp[(row - radius) * ncols + col];
+        }
+        
+        // Load bottom halo
+        if (threadIdx.y < radius && row + BLOCK_DIM < nrows) {
+            s_data[sharedRow + BLOCK_DIM][threadIdx.x] = imgtmp[(row + BLOCK_DIM) * ncols + col];
+        }
+    }
+    
+    __syncthreads();
+    
+    // Compute convolution
+    if (col >= ncols || row >= nrows) return;
+    
+    const int idx = row * ncols + col;
+    
+    if (row < radius || row >= nrows - radius) {
+        imgout[idx] = 0.0f;
+        return;
+    }
+    
+    float sum = 0.0f;
+    #pragma unroll
+    for (int k = -radius; k <= radius; ++k) {
+        sum += s_data[threadIdx.y + radius + k][threadIdx.x] * kernel[radius + k];
+    }
+    
+    imgout[idx] = sum;
 }
 
-static void convolveSeparateGPU(_KLT_FloatImage imgin,
-                                const KLT_ConvolutionKernel *horiz,
-                                const KLT_ConvolutionKernel *vert,
-                                _KLT_FloatImage imgout)
+static void convolveSeparateGPU(
+    _KLT_FloatImage imgin,
+    const KLT_ConvolutionKernel *horiz,
+    const KLT_ConvolutionKernel *vert,
+    _KLT_FloatImage imgout)
 {
-  assert(imgin != NULL);
-  assert(imgout != NULL);
-  assert(horiz != NULL);
-  assert(vert != NULL);
-  assert(horiz->width % 2 == 1);
-  assert(vert->width % 2 == 1);
-  assert(imgout->ncols >= imgin->ncols);
-  assert(imgout->nrows >= imgin->nrows);
-
-  const int ncols = imgin->ncols;
-  const int nrows = imgin->nrows;
-  const size_t numel = static_cast<size_t>(ncols) * static_cast<size_t>(nrows);
-  const size_t imageBytes = numel * sizeof(float);
-  const size_t horizBytes = static_cast<size_t>(horiz->width) * sizeof(float);
-  const size_t vertBytes = static_cast<size_t>(vert->width) * sizeof(float);
-
-  float *d_imgin = NULL;
-  float *d_tmp = NULL;
-  float *d_imgout = NULL;
-  float *d_hkernel = NULL;
-  float *d_vkernel = NULL;
-
-  CUDA_CHECK(cudaMalloc(&d_imgin, imageBytes));
-  CUDA_CHECK(cudaMalloc(&d_tmp, imageBytes));
-  CUDA_CHECK(cudaMalloc(&d_imgout, imageBytes));
-  CUDA_CHECK(cudaMalloc(&d_hkernel, horizBytes));
-  CUDA_CHECK(cudaMalloc(&d_vkernel, vertBytes));
-
-  CUDA_CHECK(cudaMemcpy(d_imgin, imgin->data, imageBytes, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_hkernel, horiz->data, horizBytes, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_vkernel, vert->data, vertBytes, cudaMemcpyHostToDevice));
-
-  const dim3 block(16, 16);
-  const dim3 grid = makeGrid2d(ncols, nrows, block);
-
-  convolveHorizontalKernel<<<grid, block>>>(d_imgin, d_tmp, d_hkernel,
-                                            horiz->width, ncols, nrows);
-  CUDA_CHECK(cudaGetLastError());
-
-  convolveVerticalKernel<<<grid, block>>>(d_tmp, d_imgout, d_vkernel,
-                                          vert->width, ncols, nrows);
-  CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaDeviceSynchronize());
-
-  CUDA_CHECK(cudaMemcpy(imgout->data, d_imgout, imageBytes, cudaMemcpyDeviceToHost));
-  imgout->ncols = ncols;
-  imgout->nrows = nrows;
-
-  cudaFree(d_imgin);
-  cudaFree(d_tmp);
-  cudaFree(d_imgout);
-  cudaFree(d_hkernel);
-  cudaFree(d_vkernel);
+    GPUContext *ctx = getGlobalGPUContext();
+    const int ncols = imgin->ncols;
+    const int nrows = imgin->nrows;
+    
+    // Initialize context if needed
+    if (ctx->allocated_ncols < ncols || ctx->allocated_nrows < nrows) {
+        if (ctx->d_buffer1) freeGPUContext(ctx);
+        initGPUContext(ctx, ncols, nrows, KLT_MAX_KERNEL_WIDTH);
+    }
+    
+    const size_t imageBytes = (size_t)ncols * nrows * sizeof(float);
+    const size_t horizBytes = horiz->width * sizeof(float);
+    const size_t vertBytes = vert->width * sizeof(float);
+    
+    // Copy data to device
+    CUDA_CHECK(cudaMemcpy(ctx->d_buffer1, imgin->data, imageBytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->d_hkernel, horiz->data, horizBytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ctx->d_vkernel, vert->data, vertBytes, cudaMemcpyHostToDevice));
+    
+    // Launch optimized kernels
+    const dim3 block(BLOCK_DIM, BLOCK_DIM);
+    const dim3 grid((ncols + BLOCK_DIM - 1) / BLOCK_DIM, 
+                    (nrows + BLOCK_DIM - 1) / BLOCK_DIM);
+    
+    convolveHorizontalKernelOptimized<<<grid, block>>>(
+        ctx->d_buffer1, ctx->d_buffer2, ctx->d_hkernel, horiz->width, ncols, nrows);
+    CUDA_CHECK(cudaGetLastError());
+    
+    convolveVerticalKernelOptimized<<<grid, block>>>(
+        ctx->d_buffer2, ctx->d_buffer3, ctx->d_vkernel, vert->width, ncols, nrows);
+    CUDA_CHECK(cudaGetLastError());
+    
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    // Copy result back
+    CUDA_CHECK(cudaMemcpy(imgout->data, ctx->d_buffer3, imageBytes, cudaMemcpyDeviceToHost));
+    imgout->ncols = ncols;
+    imgout->nrows = nrows;
 }
 
 void _KLTComputeGradientsGPU(_KLT_FloatImage img,
