@@ -2,6 +2,14 @@
 # Choose your favorite C compiler
 CC = gcc
 
+NVCC ?= nvcc
+CUDA_HOME ?= /usr/local/cuda
+CUDA_ARCH ?= -arch=sm_75
+CFLAGS_GPU = $(CFLAGS) -DKLT_USE_CUDA
+NVCCFLAGS = $(CUDA_ARCH) -O3 -DKLT_USE_CUDA $(CFLAGS)
+NVCCLDFLAGS = $(CUDA_ARCH)
+GPU_LIBS = -L$(CUDA_HOME)/lib64 -lcudart
+
 ######################################################################
 # -DNDEBUG prevents the assert() statements from being included in 
 # the code.  If you are having problems running the code, you might 
@@ -30,17 +38,27 @@ ARCH = convolve.c error.c pnmio.c pyramid.c selectGoodFeatures.c \
        storeFeatures.c trackFeatures.c klt.c klt_util.c writeFeatures.c
 LIB = -L/usr/local/lib -L/usr/lib
 
-.SUFFIXES:  .c .o
+ARCH_OBJS = $(ARCH:.c=.o)
+GPU_ARCH_OBJS = $(ARCH:.c=.gpu.o)
+GPU_EXAMPLES = example3_gpu
+
+.SUFFIXES:  .c .o .cu .gpu.o
 
 all:  lib $(EXAMPLES:.c=)
 
 .c.o:
 	$(CC) -c $(CFLAGS) $<
 
-lib: $(ARCH:.c=.o)
+%.gpu.o: %.c
+	$(CC) -c $(CFLAGS_GPU) $< -o $@
+
+%.o: %.cu
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+
+lib: $(ARCH_OBJS)
 	rm -f libklt.a
-	ar ruv libklt.a $(ARCH:.c=.o)
-	rm -f *.o
+	ar ruv libklt.a $(ARCH_OBJS)
+	rm -f $(ARCH_OBJS)
 
 example1: libklt.a
 	$(CC) -O3 $(CFLAGS) -o $@ $@.c -L. -lklt $(LIB) -lm
@@ -57,11 +75,27 @@ example4: libklt.a
 example5: libklt.a
 	$(CC) -O3 $(CFLAGS) -o $@ $@.c -L. -lklt $(LIB) -lm
 
+gpu: libklt_gpu.a $(GPU_EXAMPLES)
+
+libklt_gpu.a: $(GPU_ARCH_OBJS) convolve_gpu.o
+	rm -f libklt_gpu.a
+	ar ruv libklt_gpu.a $(GPU_ARCH_OBJS) convolve_gpu.o
+	rm -f $(GPU_ARCH_OBJS) convolve_gpu.o
+
+%_gpu: %.c libklt_gpu.a
+	$(NVCC) $(NVCCLDFLAGS) -O3 -DKLT_USE_CUDA -o $@ $< -L. -lklt_gpu $(LIB) -lm $(GPU_LIBS)
+
+run_cpu: example3
+	./example3
+
+run_gpu: example3_gpu
+	./example3_gpu
+
 depend:
 	makedepend $(ARCH) $(EXAMPLES)
 
 clean:
-	rm -f *.o *.a $(EXAMPLES:.c=) *.tar *.tar.gz libklt.a \
+	rm -f *.o *.a $(EXAMPLES:.c=) $(GPU_EXAMPLES) *.tar *.tar.gz libklt.a \
 	      feat*.ppm features.ft features.txt
 
 
@@ -73,7 +107,7 @@ clean:
 libklt_prof.a: $(ARCH)
 	$(CC) -c -pg -O2 $(CFLAGS) $(ARCH)
 	ar ruv libklt_prof.a $(ARCH:.c=.o)
-	rm -f *.o
+	rm -f $(ARCH:.c=.o)
 
 example3_prof: libklt_prof.a
 	$(CC) -pg -O2 $(CFLAGS) -o example3_prof example3.c -L. -lklt_prof $(LIB) -lm
@@ -94,4 +128,3 @@ profile: example3_prof
 
 clean-profile:
 	rm -f gmon.out profile*.txt example3_prof libklt_prof.a
-

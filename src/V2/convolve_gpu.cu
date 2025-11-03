@@ -41,8 +41,10 @@ __global__ void convolveHorizontalKernel(const float *imgin,
 
   const int base = row * ncols;
   float sum = 0.0f;
-  for (int k = -radius; k <= radius; ++k) {
-    sum += imgin[base + col + k] * kernel[radius + k];
+  // Iterate in reverse to mirror CPU implementation while advancing pixel offset left-to-right.
+  int offset = col - radius;
+  for (int k = kernelWidth - 1; k >= 0; --k, ++offset) {
+    sum += imgin[base + offset] * kernel[k];
   }
   imgtmp[idx] = sum;
 }
@@ -67,9 +69,11 @@ __global__ void convolveVerticalKernel(const float *imgtmp,
   }
 
   float sum = 0.0f;
-  for (int k = -radius; k <= radius; ++k) {
-    const int offset = (row + k) * ncols + col;
-    sum += imgtmp[offset] * kernel[radius + k];
+  // Iterate in reverse to mirror CPU implementation while advancing pixel offset top-to-bottom.
+  int offsetRow = row - radius;
+  for (int k = kernelWidth - 1; k >= 0; --k, ++offsetRow) {
+    const int offset = offsetRow * ncols + col;
+    sum += imgtmp[offset] * kernel[k];
   }
   imgout[idx] = sum;
 }
@@ -158,4 +162,3 @@ void _KLTComputeSmoothedImageGPU(_KLT_FloatImage img,
 
   convolveSeparateGPU(img, &gauss, &gauss, smooth);
 }
-

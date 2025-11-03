@@ -13,13 +13,9 @@
 #include "convolve.h"
 #include "klt_util.h"   /* printing */
 
-#define MAX_KERNEL_WIDTH 	71
+#define MAX_KERNEL_WIDTH 	KLT_MAX_KERNEL_WIDTH
 
-
-typedef struct  {
-  int width;
-  float data[MAX_KERNEL_WIDTH];
-}  ConvolutionKernel;
+typedef KLT_ConvolutionKernel ConvolutionKernel;
 
 /* Kernels */
 static ConvolutionKernel gauss_kernel;
@@ -129,12 +125,26 @@ void _KLTGetKernelWidths(
   *gaussderiv_width = gaussderiv_kernel.width;
 }
 
+void _KLTGetKernels(
+  float sigma,
+  KLT_ConvolutionKernel *gauss,
+  KLT_ConvolutionKernel *gaussderiv)
+{
+  assert(gauss != NULL);
+  assert(gaussderiv != NULL);
+
+  if (fabs(sigma - sigma_last) > 0.05f)
+    _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
+
+  *gauss = gauss_kernel;
+  *gaussderiv = gaussderiv_kernel;
+}
 
 /*********************************************************************
  * _convolveImageHoriz
  */
 
-static void _convolveImageHoriz(
+static void _convolveImageHorizCPU(
   _KLT_FloatImage imgin,
   ConvolutionKernel kernel,
   _KLT_FloatImage imgout)
@@ -186,7 +196,7 @@ static void _convolveImageHoriz(
  * _convolveImageVert
  */
 
-static void _convolveImageVert(
+static void _convolveImageVertCPU(
   _KLT_FloatImage imgin,
   ConvolutionKernel kernel,
   _KLT_FloatImage imgout)
@@ -246,7 +256,7 @@ static void _convolveImageVert(
  * _convolveSeparate
  */
 
-static void _convolveSeparate(
+static void _convolveSeparateCPU(
   _KLT_FloatImage imgin,
   ConvolutionKernel horiz_kernel,
   ConvolutionKernel vert_kernel,
@@ -257,9 +267,9 @@ static void _convolveSeparate(
   tmpimg = _KLTCreateFloatImage(imgin->ncols, imgin->nrows);
   
   /* Do convolution */
-  _convolveImageHoriz(imgin, horiz_kernel, tmpimg);
+  _convolveImageHorizCPU(imgin, horiz_kernel, tmpimg);
 
-  _convolveImageVert(tmpimg, vert_kernel, imgout);
+  _convolveImageVertCPU(tmpimg, vert_kernel, imgout);
 
   /* Free memory */
   _KLTFreeFloatImage(tmpimg);
@@ -270,7 +280,7 @@ static void _convolveSeparate(
  * _KLTComputeGradients
  */
 
-void _KLTComputeGradients(
+void _KLTComputeGradientsCPU(
   _KLT_FloatImage img,
   float sigma,
   _KLT_FloatImage gradx,
@@ -287,17 +297,29 @@ void _KLTComputeGradients(
   if (fabs(sigma - sigma_last) > 0.05)
     _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
 	
-  _convolveSeparate(img, gaussderiv_kernel, gauss_kernel, gradx);
-  _convolveSeparate(img, gauss_kernel, gaussderiv_kernel, grady);
+  _convolveSeparateCPU(img, gaussderiv_kernel, gauss_kernel, gradx);
+  _convolveSeparateCPU(img, gauss_kernel, gaussderiv_kernel, grady);
 
 }
-	
+
+void _KLTComputeGradients(
+  _KLT_FloatImage img,
+  float sigma,
+  _KLT_FloatImage gradx,
+  _KLT_FloatImage grady)
+{
+#ifdef KLT_USE_CUDA
+  _KLTComputeGradientsGPU(img, sigma, gradx, grady);
+#else
+  _KLTComputeGradientsCPU(img, sigma, gradx, grady);
+#endif
+}
 
 /*********************************************************************
  * _KLTComputeSmoothedImage
  */
 
-void _KLTComputeSmoothedImage(
+void _KLTComputeSmoothedImageCPU(
   _KLT_FloatImage img,
   float sigma,
   _KLT_FloatImage smooth)
@@ -310,8 +332,18 @@ void _KLTComputeSmoothedImage(
   if (fabs(sigma - sigma_last) > 0.05)
     _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
 
-  _convolveSeparate(img, gauss_kernel, gauss_kernel, smooth);
+  _convolveSeparateCPU(img, gauss_kernel, gauss_kernel, smooth);
 }
 
-
+void _KLTComputeSmoothedImage(
+  _KLT_FloatImage img,
+  float sigma,
+  _KLT_FloatImage smooth)
+{
+#ifdef KLT_USE_CUDA
+  _KLTComputeSmoothedImageGPU(img, sigma, smooth);
+#else
+  _KLTComputeSmoothedImageCPU(img, sigma, smooth);
+#endif
+}
 
