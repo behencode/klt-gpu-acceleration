@@ -11,13 +11,29 @@ extern "C" {
     cudaError_t err__ = (call);                                                      \
     if (err__ != cudaSuccess) {                                                      \
       KLTError("CUDA error %s (%d) at %s:%d", cudaGetErrorString(err__),             \
-               static_cast<int>(err__), __FILE__, __LINE__);                          \
+               static_cast<int>(err__), __FILE__, __LINE__);                         \
     }                                                                                \
   } while (0)
+
+#ifndef CONVOLVE_GPU_MAX_KERNEL_WIDTH
+#define CONVOLVE_GPU_MAX_KERNEL_WIDTH 64
+#endif
+
+__constant__ float c_horizontalKernel[CONVOLVE_GPU_MAX_KERNEL_WIDTH];
+__constant__ float c_verticalKernel[CONVOLVE_GPU_MAX_KERNEL_WIDTH];
 
 static dim3 makeGrid2d(int ncols, int nrows, dim3 block)
 {
   return dim3((ncols + block.x - 1) / block.x, (nrows + block.y - 1) / block.y);
+}
+
+__device__ inline float loadKernelValue(const float *kernel,
+                                        int k,
+                                        bool useConstant,
+                                        bool horizontal)
+{
+  if (!useConstant) return kernel[k];
+  return horizontal ? c_horizontalKernel[k] : c_verticalKernel[k];
 }
 
 __global__ void convolveHorizontalKernel(const float *imgin,
@@ -25,26 +41,46 @@ __global__ void convolveHorizontalKernel(const float *imgin,
                                          const float *kernel,
                                          int kernelWidth,
                                          int ncols,
-                                         int nrows)
+                                         int nrows,
+                                         bool useConstant)
 {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
-  if (col >= ncols || row >= nrows) return;
 
   const int radius = kernelWidth / 2;
   const int idx = row * ncols + col;
+
+  const int tileWidth = blockDim.x + kernelWidth - 1;
+  extern __shared__ float sharedTile[];
+  float *tileRow = sharedTile + threadIdx.y * tileWidth;
+
+  if (row < nrows) {
+    const int baseCol = blockIdx.x * blockDim.x;
+    for (int i = threadIdx.x; i < tileWidth; i += blockDim.x) {
+      const int globalCol = baseCol + i - radius;
+      float val = 0.0f;
+      if (globalCol >= 0 && globalCol < ncols) {
+        val = imgin[row * ncols + globalCol];
+      }
+      tileRow[i] = val;
+    }
+  }
+
+  __syncthreads();
+
+  if (row >= nrows || col >= ncols) return;
 
   if (col < radius || col >= ncols - radius) {
     imgtmp[idx] = 0.0f;
     return;
   }
 
-  const int base = row * ncols;
   float sum = 0.0f;
-  // Iterate in reverse to mirror CPU implementation while advancing pixel offset left-to-right.
-  int offset = col - radius;
-  for (int k = kernelWidth - 1; k >= 0; --k, ++offset) {
-    sum += imgin[base + offset] * kernel[k];
+  const int sharedOffset = threadIdx.x;
+  for (int k = kernelWidth - 1; k >= 0; --k) {
+    const float pixel = tileRow[sharedOffset + (kernelWidth - 1 - k)];
+    const float kval = loadKernelValue(kernel, k, useConstant, true);
+    sum += pixel * kval;
   }
   imgtmp[idx] = sum;
 }
@@ -52,16 +88,36 @@ __global__ void convolveHorizontalKernel(const float *imgin,
 __global__ void convolveVerticalKernel(const float *imgtmp,
                                        float *imgout,
                                        const float *kernel,
-                                       int kernelWidth,
-                                       int ncols,
-                                       int nrows)
+                                        int kernelWidth,
+                                        int ncols,
+                                       int nrows,
+                                       bool useConstant)
 {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
-  if (col >= ncols || row >= nrows) return;
 
   const int radius = kernelWidth / 2;
   const int idx = row * ncols + col;
+
+  const int tileHeight = blockDim.y + kernelWidth - 1;
+  extern __shared__ float sharedTile[];
+  float *tileCol = sharedTile + threadIdx.x;
+
+  if (col < ncols) {
+    const int baseRow = blockIdx.y * blockDim.y;
+    for (int j = threadIdx.y; j < tileHeight; j += blockDim.y) {
+      const int globalRow = baseRow + j - radius;
+      float val = 0.0f;
+      if (globalRow >= 0 && globalRow < nrows) {
+        val = imgtmp[globalRow * ncols + col];
+      }
+      tileCol[j * blockDim.x] = val;
+    }
+  }
+
+  __syncthreads();
+
+  if (row >= nrows || col >= ncols) return;
 
   if (row < radius || row >= nrows - radius) {
     imgout[idx] = 0.0f;
@@ -69,11 +125,11 @@ __global__ void convolveVerticalKernel(const float *imgtmp,
   }
 
   float sum = 0.0f;
-  // Iterate in reverse to mirror CPU implementation while advancing pixel offset top-to-bottom.
-  int offsetRow = row - radius;
-  for (int k = kernelWidth - 1; k >= 0; --k, ++offsetRow) {
-    const int offset = offsetRow * ncols + col;
-    sum += imgtmp[offset] * kernel[k];
+  const int sharedOffset = threadIdx.y;
+  for (int k = kernelWidth - 1; k >= 0; --k) {
+    const float pixel = tileCol[(sharedOffset + (kernelWidth - 1 - k)) * blockDim.x];
+    const float kval = loadKernelValue(kernel, k, useConstant, false);
+    sum += pixel * kval;
   }
   imgout[idx] = sum;
 }
@@ -108,22 +164,45 @@ static void convolveSeparateGPU(_KLT_FloatImage imgin,
   CUDA_CHECK(cudaMalloc(&d_imgin, imageBytes));
   CUDA_CHECK(cudaMalloc(&d_tmp, imageBytes));
   CUDA_CHECK(cudaMalloc(&d_imgout, imageBytes));
-  CUDA_CHECK(cudaMalloc(&d_hkernel, horizBytes));
-  CUDA_CHECK(cudaMalloc(&d_vkernel, vertBytes));
+
+  const bool useHorizontalConst = horiz->width <= CONVOLVE_GPU_MAX_KERNEL_WIDTH;
+  const bool useVerticalConst = vert->width <= CONVOLVE_GPU_MAX_KERNEL_WIDTH;
+
+  if (!useHorizontalConst) {
+    CUDA_CHECK(cudaMalloc(&d_hkernel, horizBytes));
+  }
+  if (!useVerticalConst) {
+    CUDA_CHECK(cudaMalloc(&d_vkernel, vertBytes));
+  }
 
   CUDA_CHECK(cudaMemcpy(d_imgin, imgin->data, imageBytes, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_hkernel, horiz->data, horizBytes, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_vkernel, vert->data, vertBytes, cudaMemcpyHostToDevice));
+  if (useHorizontalConst) {
+    CUDA_CHECK(cudaMemcpyToSymbol(c_horizontalKernel, horiz->data, horizBytes));
+  } else {
+    CUDA_CHECK(cudaMemcpy(d_hkernel, horiz->data, horizBytes, cudaMemcpyHostToDevice));
+  }
+  if (useVerticalConst) {
+    CUDA_CHECK(cudaMemcpyToSymbol(c_verticalKernel, vert->data, vertBytes));
+  } else {
+    CUDA_CHECK(cudaMemcpy(d_vkernel, vert->data, vertBytes, cudaMemcpyHostToDevice));
+  }
 
   const dim3 block(16, 16);
   const dim3 grid = makeGrid2d(ncols, nrows, block);
+  const size_t sharedHorizontal =
+      static_cast<size_t>(block.x + horiz->width - 1) * block.y * sizeof(float);
+  const size_t sharedVertical =
+      static_cast<size_t>(block.y + vert->width - 1) * block.x * sizeof(float);
 
-  convolveHorizontalKernel<<<grid, block>>>(d_imgin, d_tmp, d_hkernel,
-                                            horiz->width, ncols, nrows);
+  const float *horizontalKernelPtr = useHorizontalConst ? NULL : d_hkernel;
+  const float *verticalKernelPtr = useVerticalConst ? NULL : d_vkernel;
+
+  convolveHorizontalKernel<<<grid, block, sharedHorizontal>>>(
+      d_imgin, d_tmp, horizontalKernelPtr, horiz->width, ncols, nrows, useHorizontalConst);
   CUDA_CHECK(cudaGetLastError());
 
-  convolveVerticalKernel<<<grid, block>>>(d_tmp, d_imgout, d_vkernel,
-                                          vert->width, ncols, nrows);
+  convolveVerticalKernel<<<grid, block, sharedVertical>>>(
+      d_tmp, d_imgout, verticalKernelPtr, vert->width, ncols, nrows, useVerticalConst);
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -131,11 +210,11 @@ static void convolveSeparateGPU(_KLT_FloatImage imgin,
   imgout->ncols = ncols;
   imgout->nrows = nrows;
 
+  if (d_hkernel) cudaFree(d_hkernel);
+  if (d_vkernel) cudaFree(d_vkernel);
   cudaFree(d_imgin);
   cudaFree(d_tmp);
   cudaFree(d_imgout);
-  cudaFree(d_hkernel);
-  cudaFree(d_vkernel);
 }
 
 void _KLTComputeGradientsGPU(_KLT_FloatImage img,
