@@ -1,10 +1,20 @@
 #include <assert.h>
+#include <cstdlib>
 #include <cuda_runtime.h>
 
 extern "C" {
 #include "convolve.h"
 #include "error.h"
 }
+
+// Keep device buffers around so repeated calls avoid repeated cudaMalloc/cudaFree.
+static float *gDevImgIn = NULL;
+static float *gDevTmp = NULL;
+static float *gDevImgOut = NULL;
+static float *gDevKernelA = NULL;
+static float *gDevKernelB = NULL;
+static size_t gDeviceCapacity = 0;
+static int gKernelCapacity = 0;
 
 #define CUDA_CHECK(call)                                                             \
   do {                                                                               \
@@ -15,9 +25,67 @@ extern "C" {
     }                                                                                \
   } while (0)
 
-static dim3 makeGrid2d(int ncols, int nrows, dim3 block)
+static inline dim3 makeGrid2d(int ncols, int nrows, dim3 block)
 {
   return dim3((ncols + block.x - 1) / block.x, (nrows + block.y - 1) / block.y);
+}
+
+static inline size_t numImageElements(int ncols, int nrows)
+{
+  return static_cast<size_t>(ncols) * static_cast<size_t>(nrows);
+}
+
+static void releaseBuffers(void)
+{
+  if (gDevImgIn != NULL) CUDA_CHECK(cudaFree(gDevImgIn));
+  if (gDevTmp != NULL) CUDA_CHECK(cudaFree(gDevTmp));
+  if (gDevImgOut != NULL) CUDA_CHECK(cudaFree(gDevImgOut));
+  if (gDevKernelA != NULL) CUDA_CHECK(cudaFree(gDevKernelA));
+  if (gDevKernelB != NULL) CUDA_CHECK(cudaFree(gDevKernelB));
+
+  gDevImgIn = NULL;
+  gDevTmp = NULL;
+  gDevImgOut = NULL;
+  gDeviceCapacity = 0;
+  gDevKernelA = NULL;
+  gDevKernelB = NULL;
+  gKernelCapacity = 0;
+}
+
+static void ensureImageBuffers(size_t numel)
+{
+  if (numel <= gDeviceCapacity) return;
+
+  static bool cleanupRegistered = false;
+  if (!cleanupRegistered) {
+    atexit(releaseBuffers);
+    cleanupRegistered = true;
+  }
+
+  if (gDevImgIn != NULL) CUDA_CHECK(cudaFree(gDevImgIn));
+  if (gDevTmp != NULL) CUDA_CHECK(cudaFree(gDevTmp));
+  if (gDevImgOut != NULL) CUDA_CHECK(cudaFree(gDevImgOut));
+
+  const size_t bytes = numel * sizeof(float);
+  CUDA_CHECK(cudaMalloc(&gDevImgIn, bytes));
+  CUDA_CHECK(cudaMalloc(&gDevTmp, bytes));
+  CUDA_CHECK(cudaMalloc(&gDevImgOut, bytes));
+
+  gDeviceCapacity = numel;
+}
+
+static void ensureKernelBuffers(int widthA, int widthB)
+{
+  const int needed = widthA > widthB ? widthA : widthB;
+  if (needed <= gKernelCapacity) return;
+
+  if (gDevKernelA != NULL) CUDA_CHECK(cudaFree(gDevKernelA));
+  if (gDevKernelB != NULL) CUDA_CHECK(cudaFree(gDevKernelB));
+
+  CUDA_CHECK(cudaMalloc(&gDevKernelA, static_cast<size_t>(needed) * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&gDevKernelB, static_cast<size_t>(needed) * sizeof(float)));
+
+  gKernelCapacity = needed;
 }
 
 __global__ void convolveHorizontalKernel(const float *imgin,
@@ -90,48 +158,39 @@ static void convolveSeparateGPU(_KLT_FloatImage imgin,
 
   const int ncols = imgin->ncols;
   const int nrows = imgin->nrows;
-  const size_t numel = static_cast<size_t>(ncols) * static_cast<size_t>(nrows);
+  const size_t numel = numImageElements(ncols, nrows);
   const size_t imageBytes = numel * sizeof(float);
-  const size_t horizBytes = static_cast<size_t>(horiz->width) * sizeof(float);
-  const size_t vertBytes = static_cast<size_t>(vert->width) * sizeof(float);
 
-  float *d_imgin = NULL;
-  float *d_tmp = NULL;
-  float *d_imgout = NULL;
-  float *d_hkernel = NULL;
-  float *d_vkernel = NULL;
+  assert(horiz->width <= KLT_MAX_KERNEL_WIDTH);
+  assert(vert->width <= KLT_MAX_KERNEL_WIDTH);
 
-  CUDA_CHECK(cudaMalloc(&d_imgin, imageBytes));
-  CUDA_CHECK(cudaMalloc(&d_tmp, imageBytes));
-  CUDA_CHECK(cudaMalloc(&d_imgout, imageBytes));
-  CUDA_CHECK(cudaMalloc(&d_hkernel, horizBytes));
-  CUDA_CHECK(cudaMalloc(&d_vkernel, vertBytes));
+  ensureImageBuffers(numel);
+  ensureKernelBuffers(horiz->width, vert->width);
 
-  CUDA_CHECK(cudaMemcpy(d_imgin, imgin->data, imageBytes, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_hkernel, horiz->data, horizBytes, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_vkernel, vert->data, vertBytes, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(gDevImgIn, imgin->data, imageBytes, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(gDevKernelA, horiz->data,
+                        static_cast<size_t>(horiz->width) * sizeof(float),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(gDevKernelB, vert->data,
+                        static_cast<size_t>(vert->width) * sizeof(float),
+                        cudaMemcpyHostToDevice));
 
-  const dim3 block(16, 16);
+  const dim3 block(32, 8);
   const dim3 grid = makeGrid2d(ncols, nrows, block);
 
-  convolveHorizontalKernel<<<grid, block>>>(d_imgin, d_tmp, d_hkernel,
+  convolveHorizontalKernel<<<grid, block>>>(gDevImgIn, gDevTmp,
+                                            gDevKernelA,
                                             horiz->width, ncols, nrows);
   CUDA_CHECK(cudaGetLastError());
 
-  convolveVerticalKernel<<<grid, block>>>(d_tmp, d_imgout, d_vkernel,
+  convolveVerticalKernel<<<grid, block>>>(gDevTmp, gDevImgOut,
+                                          gDevKernelB,
                                           vert->width, ncols, nrows);
   CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaDeviceSynchronize());
 
-  CUDA_CHECK(cudaMemcpy(imgout->data, d_imgout, imageBytes, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(imgout->data, gDevImgOut, imageBytes, cudaMemcpyDeviceToHost));
   imgout->ncols = ncols;
   imgout->nrows = nrows;
-
-  cudaFree(d_imgin);
-  cudaFree(d_tmp);
-  cudaFree(d_imgout);
-  cudaFree(d_hkernel);
-  cudaFree(d_vkernel);
 }
 
 void _KLTComputeGradientsGPU(_KLT_FloatImage img,
@@ -158,4 +217,3 @@ void _KLTComputeSmoothedImageGPU(_KLT_FloatImage img,
 
   convolveSeparateGPU(img, &gauss, &gauss, smooth);
 }
-
