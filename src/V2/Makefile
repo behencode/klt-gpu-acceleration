@@ -3,11 +3,12 @@
 CC = gcc
 
 NVCC ?= nvcc
-CUDA_ARCH ?= -arch=sm_60
+CUDA_HOME ?= /usr/local/cuda
+CUDA_ARCH ?= -arch=sm_75
 CFLAGS_GPU = $(CFLAGS) -DKLT_USE_CUDA
 NVCCFLAGS = $(CUDA_ARCH) -O3 -DKLT_USE_CUDA $(CFLAGS)
 NVCCLDFLAGS = $(CUDA_ARCH)
-GPU_LIBS = -lcudart
+GPU_LIBS = -L$(CUDA_HOME)/lib64 -lcudart
 
 ######################################################################
 # -DNDEBUG prevents the assert() statements from being included in 
@@ -127,4 +128,3 @@ profile: example3_prof
 
 clean-profile:
 	rm -f gmon.out profile*.txt example3_prof libklt_prof.a
-
