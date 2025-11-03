@@ -11,6 +11,7 @@
 - Removed the extra `cudaDeviceSynchronize()` between kernels; we now rely on implicit stream ordering and keep the host/device copies guarded with `CUDA_CHECK`.
 - Added lightweight helper functions (`makeGrid2d`, `numImageElements`) and inline usage to keep the code tidy without introducing complex abstractions.
 - Tweaked the GPU Makefile defaults (`CUDA_ARCH=sm_75`, `CUDA_HOME=/usr/local/cuda`) so Google Colab’s Tesla T4 setup builds cleanly without manual edits.
+- Added a `safeCudaFree` helper so end-of-process cleanup ignores the expected `cudaErrorCudartUnloading` when the driver is already shutting down.
 
 ## Verification
 - Attempted to run `make gpu`; the build fails in this environment because `nvcc` is not installed. No additional errors observed in the host compile stage.

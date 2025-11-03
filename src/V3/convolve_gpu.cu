@@ -25,6 +25,17 @@ static int gKernelCapacity = 0;
     }                                                                                \
   } while (0)
 
+static inline void safeCudaFree(float **ptr)
+{
+  if (ptr == NULL || *ptr == NULL) return;
+  cudaError_t err = cudaFree(*ptr);
+  if (err != cudaSuccess && err != cudaErrorCudartUnloading) {
+    KLTError("CUDA free error %s (%d) at %s:%d", cudaGetErrorString(err),
+             static_cast<int>(err), __FILE__, __LINE__);
+  }
+  *ptr = NULL;
+}
+
 static inline dim3 makeGrid2d(int ncols, int nrows, dim3 block)
 {
   return dim3((ncols + block.x - 1) / block.x, (nrows + block.y - 1) / block.y);
@@ -37,18 +48,13 @@ static inline size_t numImageElements(int ncols, int nrows)
 
 static void releaseBuffers(void)
 {
-  if (gDevImgIn != NULL) CUDA_CHECK(cudaFree(gDevImgIn));
-  if (gDevTmp != NULL) CUDA_CHECK(cudaFree(gDevTmp));
-  if (gDevImgOut != NULL) CUDA_CHECK(cudaFree(gDevImgOut));
-  if (gDevKernelA != NULL) CUDA_CHECK(cudaFree(gDevKernelA));
-  if (gDevKernelB != NULL) CUDA_CHECK(cudaFree(gDevKernelB));
+  safeCudaFree(&gDevImgIn);
+  safeCudaFree(&gDevTmp);
+  safeCudaFree(&gDevImgOut);
+  safeCudaFree(&gDevKernelA);
+  safeCudaFree(&gDevKernelB);
 
-  gDevImgIn = NULL;
-  gDevTmp = NULL;
-  gDevImgOut = NULL;
   gDeviceCapacity = 0;
-  gDevKernelA = NULL;
-  gDevKernelB = NULL;
   gKernelCapacity = 0;
 }
 
