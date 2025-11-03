@@ -10,6 +10,7 @@
 - Tuned the launch shape to a 32×8 block configuration, providing better warp utilization for typical image widths while leaving the code easy to read.
 - Removed the extra `cudaDeviceSynchronize()` between kernels; we now rely on implicit stream ordering and keep the host/device copies guarded with `CUDA_CHECK`.
 - Added lightweight helper functions (`makeGrid2d`, `numImageElements`) and inline usage to keep the code tidy without introducing complex abstractions.
+- Tweaked the GPU Makefile defaults (`CUDA_ARCH=sm_75`, `CUDA_HOME=/usr/local/cuda`) so Google Colab’s Tesla T4 setup builds cleanly without manual edits.
 
 ## Verification
 - Attempted to run `make gpu`; the build fails in this environment because `nvcc` is not installed. No additional errors observed in the host compile stage.
