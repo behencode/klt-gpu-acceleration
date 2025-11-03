@@ -41,9 +41,9 @@ __global__ void convolveHorizontalKernel(const float *imgin,
 
   const int base = row * ncols;
   float sum = 0.0f;
-  // Iterate in reverse to mirror CPU implementation that reads kernel backwards.
-  for (int k = kernelWidth - 1; k >= 0; --k) {
-    const int offset = col + (k - radius);
+  // Iterate in reverse to mirror CPU implementation while advancing pixel offset left-to-right.
+  int offset = col - radius;
+  for (int k = kernelWidth - 1; k >= 0; --k, ++offset) {
     sum += imgin[base + offset] * kernel[k];
   }
   imgtmp[idx] = sum;
@@ -69,9 +69,9 @@ __global__ void convolveVerticalKernel(const float *imgtmp,
   }
 
   float sum = 0.0f;
-  // Iterate in reverse to mirror CPU implementation that reads kernel backwards.
-  for (int k = kernelWidth - 1; k >= 0; --k) {
-    const int offsetRow = row + (k - radius);
+  // Iterate in reverse to mirror CPU implementation while advancing pixel offset top-to-bottom.
+  int offsetRow = row - radius;
+  for (int k = kernelWidth - 1; k >= 0; --k, ++offsetRow) {
     const int offset = offsetRow * ncols + col;
     sum += imgtmp[offset] * kernel[k];
   }
