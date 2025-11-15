@@ -150,7 +150,7 @@ static void _convolveImageHorizCPU(
   _KLT_FloatImage imgout)
 {
   float *ptrrow = imgin->data;           /* Points to row's first pixel */
-  register float *ptrout = imgout->data, /* Points to next output pixel */
+  float *ptrout = imgout->data, /* Points to next output pixel */
     *ppp;
   register float sum;
   register int radius = kernel.width / 2;
@@ -205,7 +205,7 @@ static void _convolveImageVertCPU(
   _KLT_FloatImage imgout)
 {
   float *ptrcol = imgin->data;            /* Points to row's first pixel */
-  register float *ptrout = imgout->data,  /* Points to next output pixel */
+  float *ptrout = imgout->data,  /* Points to next output pixel */
     *ppp;
   register float sum;
   register int radius = kernel.width / 2;

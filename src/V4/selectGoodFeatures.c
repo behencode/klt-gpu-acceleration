@@ -392,9 +392,9 @@ void _KLTSelectGoodFeatures(
     limit = limit/2 - 1;
 		
     /* For most of the pixels in the image, do ... */
+    /* Note: Cannot easily parallelize with OpenACC due to pointer arithmetic
+       and sequential pointlist filling. Keep as CPU implementation. */
     ptr = pointlist;
-    #pragma acc parallel loop collapse(2) present(gradx, grady) \
-      reduction(+:npoints) private(gxx, gxy, gyy, xx, yy, gx, gy, val)
     for (y = bordery ; y < nrows - bordery ; y += tc->nSkippedPixels + 1)
       for (x = borderx ; x < ncols - borderx ; x += tc->nSkippedPixels + 1)  {
 
