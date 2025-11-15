@@ -114,10 +114,10 @@ void _KLTComputePyramid(
     _KLTComputeSmoothedImage(currimg, sigma, tmpimg);
 
 
-    /* Subsample with OpenACC acceleration */
+    /* Subsample with OpenACC acceleration for GPU (T4) */
     oldncols = ncols;
     ncols /= subsampling;  nrows /= subsampling;
-    #pragma acc parallel loop gang vector_length(256)
+    #pragma acc parallel loop gang num_gangs(64) vector_length(32)
     for (y = 0 ; y < nrows ; y++)
       for (x = 0 ; x < ncols ; x++)
         pyramid->img[i]->data[y*ncols+x] = 
