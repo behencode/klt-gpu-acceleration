@@ -12,11 +12,10 @@ GPU_LIBS = -L$(CUDA_HOME)/lib64 -lcudart
 
 ######################################################################
 # OpenACC compiler configuration (V4)
-# For Google Colab with T4 GPU: Use these flags
-# T4 GPU has compute capability 7.5
+# For Google Colab with T4 GPU
+# GCC uses -fopenacc flag (not -acc=gpu which is PGI-only)
 ACC_COMPILER ?= gcc
-# Enable GPU targeting with proper compute capability
-OPENACC_FLAGS = -fopenacc -O3 -march=native -acc=gpu -gpu=cc75 -DKLT_USE_OPENACC
+OPENACC_FLAGS = -fopenacc -O3 -DKLT_USE_OPENACC
 OPENACC_LIBS = -lm
 
 ######################################################################
