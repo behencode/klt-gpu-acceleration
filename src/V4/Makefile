@@ -14,7 +14,7 @@ GPU_LIBS = -L$(CUDA_HOME)/lib64 -lcudart
 # OpenACC compiler configuration (V4)
 # Supports: GCC with -fopenacc, PGI/NVHPC with -acc, Clang with -fopenacc
 ACC_COMPILER ?= gcc
-OPENACC_FLAGS = -fopenacc -O3 -DKLT_USE_OPENACC
+OPENACC_FLAGS = -fopenacc -O3 -march=native -DKLT_USE_OPENACC
 OPENACC_LIBS = -lm
 
 ######################################################################

@@ -167,9 +167,8 @@ static void _convolveImageHorizCPU(
   assert(imgout->ncols >= imgin->ncols);
   assert(imgout->nrows >= imgin->nrows);
 
-  /* OpenACC: parallelize outer row loop with data regions */
-  #pragma acc parallel loop collapse(1) present(imgin, imgout, ptrrow, ptrout) \
-    present(kernel)
+  /* OpenACC: parallelize row loop - kernel data is small so copying cost is minimal */
+  #pragma acc parallel loop gang vector_length(256)
   /* For each row, do ... */
   for (j = 0 ; j < nrows ; j++)  {
 
@@ -222,9 +221,8 @@ static void _convolveImageVertCPU(
   assert(imgout->ncols >= imgin->ncols);
   assert(imgout->nrows >= imgin->nrows);
 
-  /* OpenACC: parallelize column loop with data regions */
-  #pragma acc parallel loop collapse(1) present(imgin, imgout, ptrcol, ptrout) \
-    present(kernel)
+  /* OpenACC: parallelize column loop */
+  #pragma acc parallel loop gang vector_length(256)
   /* For each column, do ... */
   for (i = 0 ; i < ncols ; i++)  {
 

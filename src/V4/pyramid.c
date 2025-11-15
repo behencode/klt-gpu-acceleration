@@ -117,8 +117,7 @@ void _KLTComputePyramid(
     /* Subsample with OpenACC acceleration */
     oldncols = ncols;
     ncols /= subsampling;  nrows /= subsampling;
-    #pragma acc parallel loop collapse(2) independent \
-      present(pyramid, tmpimg)
+    #pragma acc parallel loop gang vector_length(256)
     for (y = 0 ; y < nrows ; y++)
       for (x = 0 ; x < ncols ; x++)
         pyramid->img[i]->data[y*ncols+x] = 

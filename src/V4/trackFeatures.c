@@ -746,9 +746,9 @@ static void _am_compute6by6GradientMatrix(
     }
   }
   
-  /* OpenACC: parallelize inner window loop with atomic updates
-     to avoid reduction clause issues with 2D arrays */
-  #pragma acc parallel loop collapse(2) present(gradx, grady, T)
+  /* Note: Keeping CPU version - atomic operations on 2D array reductions
+     are inefficient and slow down execution. Better to use CPU for this
+     fine-grained operation and let GPU handle larger parallelizable tasks. */
   for (j = -hh ; j <= hh ; j++) {
     for (i = -hw ; i <= hw ; i++)  {
       gx = *gradx++;
@@ -762,53 +762,32 @@ static void _am_compute6by6GradientMatrix(
       xy = x * y;
       yy = y * y;
       
-      #pragma acc atomic update
-      T[0][0] += xx * gxx;
-      #pragma acc atomic update
+      T[0][0] += xx * gxx; 
       T[0][1] += xx * gxy;
-      #pragma acc atomic update
       T[0][2] += xy * gxx;
-      #pragma acc atomic update
       T[0][3] += xy * gxy;
-      #pragma acc atomic update
       T[0][4] += x  * gxx;
-      #pragma acc atomic update
       T[0][5] += x  * gxy;
 	
-      #pragma acc atomic update
       T[1][1] += xx * gyy;
-      #pragma acc atomic update
       T[1][2] += xy * gxy;
-      #pragma acc atomic update
       T[1][3] += xy * gyy;
-      #pragma acc atomic update
       T[1][4] += x  * gxy;
-      #pragma acc atomic update
       T[1][5] += x  * gyy;
 			 
-      #pragma acc atomic update
       T[2][2] += yy * gxx;
-      #pragma acc atomic update
       T[2][3] += yy * gxy;
-      #pragma acc atomic update
       T[2][4] += y  * gxx;
-      #pragma acc atomic update
       T[2][5] += y  * gxy;
 	 
-      #pragma acc atomic update
       T[3][3] += yy * gyy;
-      #pragma acc atomic update
       T[3][4] += y  * gxy;
-      #pragma acc atomic update
-      T[3][5] += y  * gyy;
+      T[3][5] += y  * gyy; 
 
-      #pragma acc atomic update
-      T[4][4] += gxx;
-      #pragma acc atomic update
+      T[4][4] += gxx; 
       T[4][5] += gxy;
       
-      #pragma acc atomic update
-      T[5][5] += gyy;
+      T[5][5] += gyy; 
     }
   }
   
