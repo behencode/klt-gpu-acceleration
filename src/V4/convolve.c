@@ -1,0 +1,492 @@
+/*********************************************************************
+ * convolve.c
+ *********************************************************************/
+
+/* Standard includes */
+#include <assert.h>
+#include <math.h>
+#include <stdlib.h>   /* malloc(), realloc() */
+
+/* Our includes */
+#include "base.h"
+#include "error.h"
+#include "convolve.h"
+#include "klt_util.h"   /* printing */
+
+#define MAX_KERNEL_WIDTH 	KLT_MAX_KERNEL_WIDTH
+
+typedef KLT_ConvolutionKernel ConvolutionKernel;
+
+/* Kernels */
+static ConvolutionKernel gauss_kernel;
+static ConvolutionKernel gaussderiv_kernel;
+static float sigma_last = -10.0;
+
+
+/*********************************************************************
+ * _KLTToFloatImage
+ *
+ * Given a pointer to image data (probably unsigned chars), copy
+ * data to a float image.
+ */
+
+void _KLTToFloatImage(
+  KLT_PixelType *img,
+  int ncols, int nrows,
+  _KLT_FloatImage floatimg)
+{
+  KLT_PixelType *ptrend = img + ncols*nrows;
+  float *ptrout = floatimg->data;
+
+  /* Output image must be large enough to hold result */
+  assert(floatimg->ncols >= ncols);
+  assert(floatimg->nrows >= nrows);
+
+  floatimg->ncols = ncols;
+  floatimg->nrows = nrows;
+
+  while (img < ptrend)  *ptrout++ = (float) *img++;
+}
+
+
+/*********************************************************************
+ * _computeKernels
+ */
+
+static void _computeKernels(
+  float sigma,
+  ConvolutionKernel *gauss,
+  ConvolutionKernel *gaussderiv)
+{
+  const float factor = 0.01f;   /* for truncating tail */
+  int i;
+
+  assert(MAX_KERNEL_WIDTH % 2 == 1);
+  assert(sigma >= 0.0);
+
+  /* Compute kernels, and automatically determine widths */
+  {
+    const int hw = MAX_KERNEL_WIDTH / 2;
+    float max_gauss = 1.0f, max_gaussderiv = (float) (sigma*exp(-0.5f));
+	
+    /* Compute gauss and deriv */
+    for (i = -hw ; i <= hw ; i++)  {
+      gauss->data[i+hw]      = (float) exp(-i*i / (2*sigma*sigma));
+      gaussderiv->data[i+hw] = -i * gauss->data[i+hw];
+    }
+
+    /* Compute widths */
+    gauss->width = MAX_KERNEL_WIDTH;
+    for (i = -hw ; fabs(gauss->data[i+hw] / max_gauss) < factor ; 
+         i++, gauss->width -= 2);
+    gaussderiv->width = MAX_KERNEL_WIDTH;
+    for (i = -hw ; fabs(gaussderiv->data[i+hw] / max_gaussderiv) < factor ; 
+         i++, gaussderiv->width -= 2);
+    if (gauss->width == MAX_KERNEL_WIDTH || 
+        gaussderiv->width == MAX_KERNEL_WIDTH)
+      KLTError("(_computeKernels) MAX_KERNEL_WIDTH %d is too small for "
+               "a sigma of %f", MAX_KERNEL_WIDTH, sigma);
+  }
+
+  /* Shift if width less than MAX_KERNEL_WIDTH */
+  for (i = 0 ; i < gauss->width ; i++)
+    gauss->data[i] = gauss->data[i+(MAX_KERNEL_WIDTH-gauss->width)/2];
+  for (i = 0 ; i < gaussderiv->width ; i++)
+    gaussderiv->data[i] = gaussderiv->data[i+(MAX_KERNEL_WIDTH-gaussderiv->width)/2];
+  /* Normalize gauss and deriv */
+  {
+    const int hw = gaussderiv->width / 2;
+    float den;
+			
+    den = 0.0;
+    for (i = 0 ; i < gauss->width ; i++)  den += gauss->data[i];
+    for (i = 0 ; i < gauss->width ; i++)  gauss->data[i] /= den;
+    den = 0.0;
+    for (i = -hw ; i <= hw ; i++)  den -= i*gaussderiv->data[i+hw];
+    for (i = -hw ; i <= hw ; i++)  gaussderiv->data[i+hw] /= den;
+  }
+
+  sigma_last = sigma;
+}
+	
+
+/*********************************************************************
+ * _KLTGetKernelWidths
+ *
+ */
+
+void _KLTGetKernelWidths(
+  float sigma,
+  int *gauss_width,
+  int *gaussderiv_width)
+{
+  _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
+  *gauss_width = gauss_kernel.width;
+  *gaussderiv_width = gaussderiv_kernel.width;
+}
+
+void _KLTGetKernels(
+  float sigma,
+  KLT_ConvolutionKernel *gauss,
+  KLT_ConvolutionKernel *gaussderiv)
+{
+  assert(gauss != NULL);
+  assert(gaussderiv != NULL);
+
+  if (fabs(sigma - sigma_last) > 0.05f)
+    _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
+
+  *gauss = gauss_kernel;
+  *gaussderiv = gaussderiv_kernel;
+}
+
+/*********************************************************************
+ * _convolveImageHoriz
+ */
+
+static void _convolveImageHorizCPU(
+  _KLT_FloatImage imgin,
+  ConvolutionKernel kernel,
+  _KLT_FloatImage imgout)
+{
+  float *ptrrow = imgin->data;           /* Points to row's first pixel */
+  register float *ptrout = imgout->data, /* Points to next output pixel */
+    *ppp;
+  register float sum;
+  register int radius = kernel.width / 2;
+  register int ncols = imgin->ncols, nrows = imgin->nrows;
+  register int i, j, k;
+
+  /* Kernel width must be odd */
+  assert(kernel.width % 2 == 1);
+
+  /* Must read from and write to different images */
+  assert(imgin != imgout);
+
+  /* Output image must be large enough to hold result */
+  assert(imgout->ncols >= imgin->ncols);
+  assert(imgout->nrows >= imgin->nrows);
+
+  /* For each row, do ... */
+  for (j = 0 ; j < nrows ; j++)  {
+
+    /* Zero leftmost columns */
+    for (i = 0 ; i < radius ; i++)
+      *ptrout++ = 0.0;
+
+    /* Convolve middle columns with kernel */
+    for ( ; i < ncols - radius ; i++)  {
+      ppp = ptrrow + i - radius;
+      sum = 0.0;
+      for (k = kernel.width-1 ; k >= 0 ; k--)
+        sum += *ppp++ * kernel.data[k];
+      *ptrout++ = sum;
+    }
+
+    /* Zero rightmost columns */
+    for ( ; i < ncols ; i++)
+      *ptrout++ = 0.0;
+
+    ptrrow += ncols;
+  }
+}
+
+#ifdef KLT_USE_OPENACC
+static void _convolveImageHorizACC(
+  _KLT_FloatImage imgin,
+  ConvolutionKernel kernel,
+  _KLT_FloatImage imgout)
+{
+  const int radius = kernel.width / 2;
+  const int ncols = imgin->ncols;
+  const int nrows = imgin->nrows;
+  const int total = ncols * nrows;
+  const int kernel_width = kernel.width;
+  const float *kernel_data = kernel.data;
+  float *in = imgin->data;
+  float *out = imgout->data;
+
+  assert(kernel.width % 2 == 1);
+  assert(imgout->ncols >= imgin->ncols);
+  assert(imgout->nrows >= imgin->nrows);
+  assert(imgin != imgout);
+
+#pragma acc parallel loop collapse(2) present(in[0:total], out[0:total], kernel_data[0:kernel_width])
+  for (int j = 0; j < nrows; ++j) {
+    for (int i = 0; i < ncols; ++i) {
+      const int idx = j * ncols + i;
+      if (i < radius || i >= ncols - radius) {
+        out[idx] = 0.0f;
+      } else {
+        float sum = 0.0f;
+        for (int k = 0; k < kernel_width; ++k) {
+          const int in_idx = j * ncols + (i - radius + k);
+          sum += in[in_idx] * kernel_data[kernel_width - 1 - k];
+        }
+        out[idx] = sum;
+      }
+    }
+  }
+}
+#endif
+
+
+/*********************************************************************
+ * _convolveImageVert
+ */
+
+static void _convolveImageVertCPU(
+  _KLT_FloatImage imgin,
+  ConvolutionKernel kernel,
+  _KLT_FloatImage imgout)
+{
+  float *ptrcol = imgin->data;            /* Points to row's first pixel */
+  register float *ptrout = imgout->data,  /* Points to next output pixel */
+    *ppp;
+  register float sum;
+  register int radius = kernel.width / 2;
+  register int ncols = imgin->ncols, nrows = imgin->nrows;
+  register int i, j, k;
+
+  /* Kernel width must be odd */
+  assert(kernel.width % 2 == 1);
+
+  /* Must read from and write to different images */
+  assert(imgin != imgout);
+
+  /* Output image must be large enough to hold result */
+  assert(imgout->ncols >= imgin->ncols);
+  assert(imgout->nrows >= imgin->nrows);
+
+  /* For each column, do ... */
+  for (i = 0 ; i < ncols ; i++)  {
+
+    /* Zero topmost rows */
+    for (j = 0 ; j < radius ; j++)  {
+      *ptrout = 0.0;
+      ptrout += ncols;
+    }
+
+    /* Convolve middle rows with kernel */
+    for ( ; j < nrows - radius ; j++)  {
+      ppp = ptrcol + ncols * (j - radius);
+      sum = 0.0;
+      for (k = kernel.width-1 ; k >= 0 ; k--)  {
+        sum += *ppp * kernel.data[k];
+        ppp += ncols;
+      }
+      *ptrout = sum;
+      ptrout += ncols;
+    }
+
+    /* Zero bottommost rows */
+    for ( ; j < nrows ; j++)  {
+      *ptrout = 0.0;
+      ptrout += ncols;
+    }
+
+    ptrcol++;
+    ptrout -= nrows * ncols - 1;
+  }
+}
+
+#ifdef KLT_USE_OPENACC
+static void _convolveImageVertACC(
+  _KLT_FloatImage imgin,
+  ConvolutionKernel kernel,
+  _KLT_FloatImage imgout)
+{
+  const int radius = kernel.width / 2;
+  const int ncols = imgin->ncols;
+  const int nrows = imgin->nrows;
+  const int total = ncols * nrows;
+  const int kernel_width = kernel.width;
+  const float *kernel_data = kernel.data;
+  float *in = imgin->data;
+  float *out = imgout->data;
+
+  assert(kernel.width % 2 == 1);
+  assert(imgout->ncols >= imgin->ncols);
+  assert(imgout->nrows >= imgin->nrows);
+  assert(imgin != imgout);
+
+#pragma acc parallel loop collapse(2) present(in[0:total], out[0:total], kernel_data[0:kernel_width])
+  for (int i = 0; i < ncols; ++i) {
+    for (int j = 0; j < nrows; ++j) {
+      const int idx = j * ncols + i;
+      if (j < radius || j >= nrows - radius) {
+        out[idx] = 0.0f;
+      } else {
+        float sum = 0.0f;
+        for (int k = 0; k < kernel_width; ++k) {
+          const int in_idx = (j - radius + k) * ncols + i;
+          sum += in[in_idx] * kernel_data[kernel_width - 1 - k];
+        }
+        out[idx] = sum;
+      }
+    }
+  }
+}
+#endif
+
+
+/*********************************************************************
+ * _convolveSeparate
+ */
+
+static void _convolveSeparateCPU(
+  _KLT_FloatImage imgin,
+  ConvolutionKernel horiz_kernel,
+  ConvolutionKernel vert_kernel,
+  _KLT_FloatImage imgout)
+{
+  /* Create temporary image */
+  _KLT_FloatImage tmpimg;
+  tmpimg = _KLTCreateFloatImage(imgin->ncols, imgin->nrows);
+  
+  /* Do convolution */
+  _convolveImageHorizCPU(imgin, horiz_kernel, tmpimg);
+
+  _convolveImageVertCPU(tmpimg, vert_kernel, imgout);
+
+  /* Free memory */
+  _KLTFreeFloatImage(tmpimg);
+}
+
+#ifdef KLT_USE_OPENACC
+static void _convolveSeparateACC(
+  _KLT_FloatImage imgin,
+  ConvolutionKernel horiz_kernel,
+  ConvolutionKernel vert_kernel,
+  _KLT_FloatImage imgout)
+{
+  _KLT_FloatImage tmpimg = _KLTCreateFloatImage(imgin->ncols, imgin->nrows);
+  const int total = imgin->ncols * imgin->nrows;
+  const int hwidth = horiz_kernel.width;
+  const int vwidth = vert_kernel.width;
+
+#pragma acc data copyin(imgin->data[0:total], \
+                         horiz_kernel.data[0:hwidth], \
+                         vert_kernel.data[0:vwidth]) \
+                 copyout(imgout->data[0:total]) \
+                 create(tmpimg->data[0:total])
+  {
+    _convolveImageHorizACC(imgin, horiz_kernel, tmpimg);
+    _convolveImageVertACC(tmpimg, vert_kernel, imgout);
+  }
+
+  _KLTFreeFloatImage(tmpimg);
+}
+#endif
+
+	
+/*********************************************************************
+ * _KLTComputeGradients
+ */
+
+void _KLTComputeGradientsCPU(
+  _KLT_FloatImage img,
+  float sigma,
+  _KLT_FloatImage gradx,
+  _KLT_FloatImage grady)
+{
+				
+  /* Output images must be large enough to hold result */
+  assert(gradx->ncols >= img->ncols);
+  assert(gradx->nrows >= img->nrows);
+  assert(grady->ncols >= img->ncols);
+  assert(grady->nrows >= img->nrows);
+
+  /* Compute kernels, if necessary */
+  if (fabs(sigma - sigma_last) > 0.05)
+    _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
+	
+  _convolveSeparateCPU(img, gaussderiv_kernel, gauss_kernel, gradx);
+  _convolveSeparateCPU(img, gauss_kernel, gaussderiv_kernel, grady);
+
+}
+
+void _KLTComputeGradients(
+  _KLT_FloatImage img,
+  float sigma,
+  _KLT_FloatImage gradx,
+  _KLT_FloatImage grady)
+{
+#ifdef KLT_USE_CUDA
+  _KLTComputeGradientsGPU(img, sigma, gradx, grady);
+#elif defined(KLT_USE_OPENACC)
+  _KLTComputeGradientsACC(img, sigma, gradx, grady);
+#else
+  _KLTComputeGradientsCPU(img, sigma, gradx, grady);
+#endif
+}
+
+#ifdef KLT_USE_OPENACC
+void _KLTComputeGradientsACC(
+  _KLT_FloatImage img,
+  float sigma,
+  _KLT_FloatImage gradx,
+  _KLT_FloatImage grady)
+{
+  assert(gradx->ncols >= img->ncols);
+  assert(gradx->nrows >= img->nrows);
+  assert(grady->ncols >= img->ncols);
+  assert(grady->nrows >= img->nrows);
+
+  if (fabs(sigma - sigma_last) > 0.05f)
+    _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
+
+  _convolveSeparateACC(img, gaussderiv_kernel, gauss_kernel, gradx);
+  _convolveSeparateACC(img, gauss_kernel, gaussderiv_kernel, grady);
+}
+#endif
+
+/*********************************************************************
+ * _KLTComputeSmoothedImage
+ */
+
+void _KLTComputeSmoothedImageCPU(
+  _KLT_FloatImage img,
+  float sigma,
+  _KLT_FloatImage smooth)
+{
+  /* Output image must be large enough to hold result */
+  assert(smooth->ncols >= img->ncols);
+  assert(smooth->nrows >= img->nrows);
+
+  /* Compute kernel, if necessary; gauss_deriv is not used */
+  if (fabs(sigma - sigma_last) > 0.05)
+    _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
+
+  _convolveSeparateCPU(img, gauss_kernel, gauss_kernel, smooth);
+}
+
+void _KLTComputeSmoothedImage(
+  _KLT_FloatImage img,
+  float sigma,
+  _KLT_FloatImage smooth)
+{
+#ifdef KLT_USE_CUDA
+  _KLTComputeSmoothedImageGPU(img, sigma, smooth);
+#elif defined(KLT_USE_OPENACC)
+  _KLTComputeSmoothedImageACC(img, sigma, smooth);
+#else
+  _KLTComputeSmoothedImageCPU(img, sigma, smooth);
+#endif
+}
+
+#ifdef KLT_USE_OPENACC
+void _KLTComputeSmoothedImageACC(
+  _KLT_FloatImage img,
+  float sigma,
+  _KLT_FloatImage smooth)
+{
+  assert(smooth->ncols >= img->ncols);
+  assert(smooth->nrows >= img->nrows);
+
+  if (fabs(sigma - sigma_last) > 0.05f)
+    _computeKernels(sigma, &gauss_kernel, &gaussderiv_kernel);
+
+  _convolveSeparateACC(img, gauss_kernel, gauss_kernel, smooth);
+}
+#endif
