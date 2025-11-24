@@ -1,9 +1,8 @@
-"""Generate performance graphs driven entirely by performance_data.json.
+"""Generate dataset-specific performance graphs from performance_data.json.
 
-Run `python3 performance_graphs.py` from the src directory once
-`collect_performance_data.py` (and any manual edits) have refreshed
-`performance_data.json`. Every chart consumes the structured sections stored in
-that JSON file so the published figures stay in sync with the latest benchmarks.
+Run `python3 performance_graphs.py` after refreshing metrics with
+`collect_performance_data.py`.  The script emits one set of PNGs per dataset
+under `figures/<dataset>/`.
 """
 from __future__ import annotations
 
@@ -14,14 +13,21 @@ from typing import Any, Dict, List
 import matplotlib.pyplot as plt
 import numpy as np
 
-PLOT_DIR = Path(__file__).with_name("figures")
+PLOT_ROOT = Path(__file__).with_name("figures")
 DATA_PATH = Path(__file__).with_name("performance_data.json")
-PLOT_DIR.mkdir(exist_ok=True)
+PLOT_ROOT.mkdir(exist_ok=True)
+CURRENT_PLOT_DIR = PLOT_ROOT
+
+
+def set_output_dir(directory: Path) -> None:
+    global CURRENT_PLOT_DIR
+    CURRENT_PLOT_DIR = directory
+    CURRENT_PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def save_fig(fig: plt.Figure, filename: str) -> None:
-    """Persist figure under figures/ and close the Matplotlib handle."""
-    fig.savefig(PLOT_DIR / filename, dpi=300, bbox_inches="tight")
+    """Save figure to the active figures directory and close it."""
+    fig.savefig(CURRENT_PLOT_DIR / filename, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -38,17 +44,12 @@ def require_section(dataset: Dict[str, Any], name: str) -> Dict[str, Any]:
     return dataset[name]
 
 
-def build_speedup_data(dataset: Dict[str, Any]) -> Dict[str, List[float]]:
-    derived = dataset.get("derived", {})
+def build_speedup_data(dataset_info: Dict[str, Any]) -> Dict[str, List[float]]:
+    derived = dataset_info.get("derived", {})
     speedup = derived.get("speedup")
     if not speedup:
-        raise KeyError("`derived.speedup` missing from performance_data.json")
-    if "version_order" in dataset:
-        versions = dataset["version_order"]
-    elif "results" in dataset:
-        versions = list(dataset["results"].keys())
-    else:
-        versions = list(speedup.keys())
+        raise KeyError("`derived.speedup` missing for dataset")
+    versions = list(speedup.keys())
     return {"versions": versions, "speedup": [speedup[v] for v in versions]}
 
 
@@ -140,10 +141,7 @@ def plot_gpu_utilization(data: Dict[str, Any]) -> None:
     width = 0.25
     metrics = data["metrics"]
     metric_names = list(metrics.keys())
-    if len(metric_names) == 1:
-        offsets = [0.0]
-    else:
-        offsets = np.linspace(-width, width, num=len(metric_names))
+    offsets = np.linspace(-width, width, num=len(metric_names)) if metric_names else [0]
     for offset, name in zip(offsets, metric_names):
         ax.bar(x + offset, metrics[name], width, label=name.replace("_", " ").title())
     ax.set_xticks(x)
@@ -202,17 +200,24 @@ def plot_memory_access(data: Dict[str, Any]) -> None:
     save_fig(fig, "memory_access.png")
 
 
-def main() -> None:
-    dataset = load_dataset()
-    speedup = build_speedup_data(dataset)
-    execution_breakdown = require_section(dataset, "execution_breakdown")
-    strong_scaling = require_section(dataset, "strong_scaling")
-    weak_scaling = require_section(dataset, "weak_scaling")
-    hotspot = require_section(dataset, "hotspot_analysis")
-    gpu_util = require_section(dataset, "gpu_utilization")
-    roof = require_section(dataset, "roofline")
-    eff = require_section(dataset, "efficiency")
-    memory = require_section(dataset, "memory_access")
+def dataset_section(dataset_info: Dict[str, Any], global_data: Dict[str, Any], section: str) -> Dict[str, Any]:
+    if section in dataset_info:
+        return dataset_info[section]
+    return require_section(global_data, section)
+
+
+def generate_for_dataset(name: str, dataset_info: Dict[str, Any], global_data: Dict[str, Any]) -> None:
+    print(f"Generating figures for dataset '{name}'")
+    set_output_dir(PLOT_ROOT / name)
+    speedup = build_speedup_data(dataset_info)
+    execution_breakdown = dataset_section(dataset_info, global_data, "execution_breakdown")
+    strong_scaling = dataset_section(dataset_info, global_data, "strong_scaling")
+    weak_scaling = dataset_section(dataset_info, global_data, "weak_scaling")
+    hotspot = dataset_section(dataset_info, global_data, "hotspot_analysis")
+    gpu_util = dataset_section(dataset_info, global_data, "gpu_utilization")
+    roof = dataset_section(dataset_info, global_data, "roofline")
+    eff = dataset_section(dataset_info, global_data, "efficiency")
+    memory = dataset_section(dataset_info, global_data, "memory_access")
 
     plot_speedup_chart(speedup)
     plot_execution_breakdown(execution_breakdown)
@@ -223,7 +228,17 @@ def main() -> None:
     plot_roofline(roof)
     plot_efficiency(eff)
     plot_memory_access(memory)
-    print(f"Saved figures to {PLOT_DIR.resolve()}")
+
+
+def main() -> None:
+    dataset = load_dataset()
+    datasets_section = dataset.get("datasets")
+    if not datasets_section:
+        raise KeyError("`datasets` section missing from performance_data.json")
+
+    for name, dataset_info in datasets_section.items():
+        generate_for_dataset(name, dataset_info, dataset)
+    print(f"Saved figures to {PLOT_ROOT.resolve()}/*")
 
 
 if __name__ == "__main__":
