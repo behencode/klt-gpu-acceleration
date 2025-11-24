@@ -159,8 +159,11 @@ def discover_datasets(dataset_root: Path) -> Dict[DatasetName, Path]:
     return datasets
 
 
-def cleanup_dataset_outputs(dataset_path: Path) -> None:
+def cleanup_dataset_outputs(dataset_path: Path, skip: Optional[Sequence[str]] = None) -> None:
+    skip = set(skip or ())
     for pattern in INTERMEDIATE_PATTERNS:
+        if pattern in skip:
+            continue
         for candidate in dataset_path.glob(pattern):
             try:
                 candidate.unlink()
@@ -200,6 +203,7 @@ def execute_binary(
     binary: Path,
     dataset_path: Path,
     env: Optional[Dict[str, str]] = None,
+    cleanup_after_skip: Optional[Sequence[str]] = None,
 ) -> RunSample:
     env_vars = os_environ_with_updates(env)
     cleanup_dataset_outputs(dataset_path)
@@ -216,7 +220,7 @@ def execute_binary(
         stdout=trim_output(proc.stdout),
         stderr=trim_output(proc.stderr),
     )
-    cleanup_dataset_outputs(dataset_path)
+    cleanup_dataset_outputs(dataset_path, skip=cleanup_after_skip)
     return sample
 
 
@@ -289,7 +293,7 @@ def collect_hotspots(
     if not build_ok:
         return []
     binary = version_dir / "example3_prof"
-    sample = execute_binary(binary, dataset_path)
+    sample = execute_binary(binary, dataset_path, cleanup_after_skip=("gmon.out",))
     if sample.returncode != 0:
         log(
             f"[warn] profiling run for {version_dir.name} failed: {sample.stderr}"
