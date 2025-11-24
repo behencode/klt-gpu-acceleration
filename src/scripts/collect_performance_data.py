@@ -596,11 +596,15 @@ def main() -> None:
             raise FileNotFoundError(f"Version directory {vdir} missing")
         log(f"Building CPU target for {version}")
         if not args.dry_run:
-            build_target(vdir, "example3")
+            success, output = build_target(vdir, "example3")
+            if not success:
+                raise RuntimeError(f"{version} CPU build failed:\n{trim_output(output)}")
         if (vdir / "convolve_gpu.cu").exists():
             log(f"Building GPU target for {version}")
             if not args.dry_run:
-                build_target(vdir, "example3_gpu")
+                success, output = build_target(vdir, "example3_gpu")
+                if not success:
+                    raise RuntimeError(f"{version} GPU build failed:\n{trim_output(output)}")
         else:
             log(f"No GPU sources found for {version}; GPU runs will be skipped")
 
