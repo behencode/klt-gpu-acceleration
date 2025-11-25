@@ -125,7 +125,6 @@ def log(msg: str) -> None:
 def read_pgm_metadata(pgm_path: Path) -> Tuple[int, int, int]:
     # PGM files store width, height, and bit depth in ASCII headers. We only need
     # those values to estimate the total number of pixels/bytes in a dataset.
-    log(f"Reading PGM metadata from {pgm_path}")
     with pgm_path.open("rb") as fh:
         magic = fh.readline().strip()
         if magic not in {b"P5", b"P2"}:
@@ -148,38 +147,32 @@ def read_pgm_metadata(pgm_path: Path) -> Tuple[int, int, int]:
             break
     if width is None or height is None or maxval is None:
         raise ValueError(f"Failed to parse metadata from {pgm_path}")
-    log(f"Metadata for {pgm_path.name}: width={width}, height={height}, maxval={maxval}")
     return width, height, maxval
 
 
 def discover_datasets(dataset_root: Path) -> Dict[DatasetName, Path]:
     # Dataset directories contain per-frame .pgm files. Each top-level folder
     # counts as one dataset (small/medium/large, etc.).
-    log(f"Discovering datasets under {dataset_root}")
     datasets = {}
     if not dataset_root.exists():
         raise FileNotFoundError(f"Dataset root {dataset_root} not found.")
     for entry in sorted(dataset_root.iterdir()):
         if entry.is_dir():
             datasets[entry.name] = entry
-            log(f"  Found dataset {entry.name} at {entry}")
     if not datasets:
         raise RuntimeError(f"No datasets discovered under {dataset_root}")
-    log(f"Discovered datasets: {', '.join(datasets.keys())}")
     return datasets
 
 
 def cleanup_dataset_outputs(dataset_path: Path, skip: Optional[Sequence[str]] = None) -> None:
     # Every tracker run dumps intermediate feature files into the dataset folder.
     # Remove them before/after runs so measurements never pick up stale data.
-    log(f"Cleaning dataset outputs in {dataset_path}")
     skip = set(skip or ())
     for pattern in INTERMEDIATE_PATTERNS:
         if pattern in skip:
             continue
         for candidate in dataset_path.glob(pattern):
             try:
-                log(f"  Removing {candidate}")
                 candidate.unlink()
             except FileNotFoundError:
                 pass
@@ -190,7 +183,6 @@ def run_command(
     cwd: Path,
     env: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess:
-    log(f"Running command: {' '.join(cmd)} (cwd={cwd})")
     proc = subprocess.run(
         list(cmd),
         cwd=str(cwd),
@@ -198,21 +190,14 @@ def run_command(
         capture_output=True,
         text=True,
     )
-    log(
-        f"Command finished (rc={proc.returncode}) stdout_len={len(proc.stdout)} "
-        f"stderr_len={len(proc.stderr)}"
-    )
     return proc
 
 
 def build_target(version_dir: Path, target: str) -> Tuple[bool, str]:
-    log(f"Invoking make {target} in {version_dir}")
     proc = run_command(["make", target], version_dir)
     success = proc.returncode == 0
     if not success:
         log(f"[warn] make {target} in {version_dir.name} failed: {proc.stderr.strip()}")
-    else:
-        log(f"make {target} in {version_dir.name} succeeded")
     return success, proc.stderr + proc.stdout
 
 
@@ -229,7 +214,6 @@ def execute_binary(
     cleanup_after_skip: Optional[Sequence[str]] = None,
 ) -> RunSample:
     # Clear out dataset artifacts to make room for the next run.
-    log(f"Preparing to execute {binary} on dataset {dataset_path}")
     env_vars = os_environ_with_updates(env)
     cleanup_dataset_outputs(dataset_path)
     # Use resource.getrusage so we can separate user/sys/other time later.
@@ -238,11 +222,6 @@ def execute_binary(
     proc = run_command([str(binary)], dataset_path, env_vars)
     end = time.perf_counter()
     usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    log(
-        f"Execution finished: returncode={proc.returncode}, elapsed={end - start:.4f}s, "
-        f"userΔ={usage_after.ru_utime - usage_before.ru_utime:.4f}, "
-        f"sysΔ={usage_after.ru_stime - usage_before.ru_stime:.4f}"
-    )
     sample = RunSample(
         elapsed=end - start,
         user=max(usage_after.ru_utime - usage_before.ru_utime, 0.0),
@@ -252,7 +231,6 @@ def execute_binary(
         stderr=trim_output(proc.stderr),
     )
     cleanup_dataset_outputs(dataset_path, skip=cleanup_after_skip)
-    log(f"Sample collected: {sample}")
     return sample
 
 
@@ -260,7 +238,6 @@ def os_environ_with_updates(extra: Optional[Dict[str, str]]) -> Dict[str, str]:
     env = os.environ.copy()
     if extra:
         env.update(extra)
-    log(f"Environment for command: overrides={extra}")
     return env
 
 
@@ -272,24 +249,17 @@ def collect_runs(
 ) -> Dict:
     # Run the same binary multiple times to build a statistical sample. Fail-fast
     # if any iteration returns non-zero so we capture the stderr in the output.
-    log(f"Collecting {iterations} run(s) for {binary} on {dataset_path}")
     samples: List[RunSample] = []
     failure_reason: Optional[str] = None
     for i in range(iterations):
-        log(f"  Iteration {i+1}/{iterations} starting")
         sample = execute_binary(binary, dataset_path, env)
         samples.append(sample)
-        log(
-            f"  Iteration {i+1} complete: elapsed={sample.elapsed:.4f}s "
-            f"user={sample.user:.4f}s sys={sample.sys:.4f}s rc={sample.returncode}"
-        )
         if sample.returncode != 0:
             failure_reason = (
                 f"Iteration {i} failed with code {sample.returncode}: {sample.stderr}"
             )
             break
     stats = summarize_samples(samples)
-    log(f"Collected {len(samples)} sample(s); stats={stats}")
     return {
         "binary": str(binary),
         "iterations": len(samples),
@@ -303,7 +273,6 @@ def summarize_samples(samples: Sequence[RunSample]) -> Dict[str, Optional[float]
     # Turn the raw RunSample objects into aggregate stats. These numbers feed
     # directly into the JSON report and the later visualization scripts.
     if not samples:
-        log("No samples provided to summarize_samples")
         return {"mean": None, "median": None, "stdev": None, "user": None, "sys": None, "other": None}
     elapsed = [s.elapsed for s in samples]
     user = [s.user for s in samples]
@@ -321,17 +290,13 @@ def summarize_samples(samples: Sequence[RunSample]) -> Dict[str, Optional[float]
         "sys": statistics.mean(sys_times),
         "other": statistics.mean(other),
     }
-    log(f"Summarized {len(samples)} sample(s): {summary}")
     return summary
 
 
 def best_stat(stats: Dict[str, Optional[float]]) -> Optional[float]:
     if not stats:
-        log("best_stat called with empty stats")
         return None
-    val = stats.get("mean")
-    log(f"best_stat returning {val} from stats={stats}")
-    return val
+    return stats.get("mean")
 
 
 def collect_hotspots(
@@ -341,7 +306,6 @@ def collect_hotspots(
 ) -> List[Tuple[str, float]]:
     # Build the gprof-enabled binary, run it once, then parse "flat profile" to
     # extract the hottest functions. We only keep the top N percentages.
-    log(f"Collecting hotspots for {version_dir.name} using dataset {dataset_path}")
     build_ok, _ = build_target(version_dir, "example3_prof")
     if not build_ok:
         return []
@@ -364,13 +328,10 @@ def collect_hotspots(
     if proc.returncode != 0:
         log(f"[warn] gprof failed for {version_dir.name}: {proc.stderr}")
         return []
-    hotspots = parse_gprof(proc.stdout, top_n)
-    log(f"Top {len(hotspots)} hotspot entries for {version_dir.name}: {hotspots}")
-    return hotspots
+    return parse_gprof(proc.stdout, top_n)
 
 
 def parse_gprof(output: str, top_n: int) -> List[Tuple[str, float]]:
-    log(f"Parsing gprof output (top_n={top_n})")
     lines = output.splitlines()
     flat_idx = None
     for i, line in enumerate(lines):
@@ -406,14 +367,12 @@ def parse_gprof(output: str, top_n: int) -> List[Tuple[str, float]]:
                 break
         except ValueError:
             continue
-    log(f"Parsed hotspot entries: {entries}")
     return entries
 
 
 def dataset_metadata(dataset_path: Path) -> Dict[str, float]:
     # One dataset == many frames. Metadata gives us scaling context for charts
     # (pixels, bytes, frame count) without re-reading during every experiment.
-    log(f"Computing dataset metadata for {dataset_path}")
     pgm_files = sorted(dataset_path.glob("*.pgm"))
     if not pgm_files:
         raise RuntimeError(f"No .pgm files found in {dataset_path}")
@@ -422,42 +381,32 @@ def dataset_metadata(dataset_path: Path) -> Dict[str, float]:
     pixels = width * height * frames
     bytes_per_pixel = 1 if maxval < 256 else 2
     total_bytes = pixels * bytes_per_pixel
-    meta = {
+    return {
         "width": width,
         "height": height,
         "frames": frames,
         "pixels": pixels,
         "bytes": total_bytes,
     }
-    log(f"Metadata for {dataset_path.name}: {meta}")
-    return meta
 
 
 def select_best_device(cpu_stats: Dict, gpu_stats: Optional[Dict]) -> Tuple[str, Dict]:
-    log(f"Selecting best device between CPU stats={cpu_stats} and GPU stats={gpu_stats}")
     cpu_time = best_stat(cpu_stats.get("stats") if cpu_stats else {})
     gpu_time = best_stat(gpu_stats.get("stats") if gpu_stats else {}) if gpu_stats else None
     if gpu_time is None and cpu_time is None:
-        log("Neither CPU nor GPU stats available; returning unavailable")
         return "unavailable", {}
     if gpu_time is not None and (cpu_time is None or gpu_time <= cpu_time):
-        log(f"Chose GPU (gpu_time={gpu_time}, cpu_time={cpu_time})")
         return "gpu", gpu_stats
-    log(f"Chose CPU (cpu_time={cpu_time}, gpu_time={gpu_time})")
     return "cpu", cpu_stats
 
 
 def compute_speedup(baseline: Optional[float], target: Optional[float]) -> Optional[float]:
     if baseline is None or target is None or target == 0:
-        log(f"Cannot compute speedup with baseline={baseline}, target={target}")
         return None
-    speed = baseline / target
-    log(f"Computed speedup: baseline={baseline}, target={target}, speedup={speed}")
-    return speed
+    return baseline / target
 
 
 def aggregate_best_times(dataset_results: Dict[VersionName, Dict]) -> Dict[VersionName, Dict]:
-    log("Aggregating best times per dataset")
     best = {}
     for version, devices in dataset_results.items():
         best_device, best_entry = select_best_device(devices.get("cpu"), devices.get("gpu"))
@@ -466,29 +415,23 @@ def aggregate_best_times(dataset_results: Dict[VersionName, Dict]) -> Dict[Versi
             "entry": best_entry,
             "time": best_stat(best_entry.get("stats", {})) if best_entry else None,
         }
-        log(f"  Version {version}: device={best_device}, time={best[version]['time']}")
     return best
 
 
 def compute_execution_breakdown(entry: Optional[Dict]) -> Optional[Dict[str, float]]:
     if not entry:
-        log("No entry provided for execution breakdown")
         return None
     stats = entry.get("stats")
     if not stats:
-        log("Entry missing stats for execution breakdown")
         return None
-    breakdown = {
+    return {
         "computation": stats.get("user"),
         "memory_transfer": stats.get("sys"),
         "other": stats.get("other"),
     }
-    log(f"Execution breakdown: {breakdown}")
-    return breakdown
 
 
 def compute_weak_scaling(best_times: Dict[str, Dict], metas: Dict[str, Dict]) -> Dict[str, List]:
-    log("Computing weak scaling metrics")
     ordered = sorted(best_times.items(), key=lambda kv: metas[kv[0]]["pixels"])
     problem_sizes = [f"{metas[name]['width']}x{metas[name]['height']}x{metas[name]['frames']}" for name, _ in ordered]
     times = [info["time"] for _, info in ordered]
@@ -507,7 +450,6 @@ def compute_gpu_metrics(reference_dataset: str, datasets: Dict, versions: Sequen
     # GPU utilization charts need relative metrics (occupancy, bandwidth, SM use)
     # derived from simple throughput/bandwidth estimates. We normalize each
     # version against the best observed number so everything falls in [0,100].
-    log(f"Computing GPU metrics for reference dataset {reference_dataset}")
     dataset_entry = datasets.get(reference_dataset)
     if not dataset_entry:
         log("Reference dataset missing for GPU metrics")
@@ -554,7 +496,6 @@ def compute_roofline(reference_dataset: str, best_times: Dict[str, Dict], metas:
     # Build classic roofline data: arithmetic intensity stays fixed per dataset,
     # so each version becomes a point in intensity/performance space. We also
     # capture the current "machine peak" (fastest observed) for comparison.
-    log(f"Computing roofline data for {reference_dataset}")
     dataset_meta = metas[reference_dataset]
     points = []
     performances = []
@@ -600,7 +541,6 @@ def compute_efficiency(roofline: Dict, points: List[Dict]) -> Dict:
 def compute_memory_access_metrics(reference_dataset: str, datasets: Dict, metas: Dict[str, Dict]) -> Dict:
     # Lightweight proxy for how memory hierarchy tweaks affect latency vs. raw
     # throughput. Each strategy label maps to a version (global/shared/texture).
-    log(f"Computing memory access metrics for {reference_dataset}")
     mapping = {"V2": "Global", "V3": "Shared", "V4": "Texture"}
     dataset_entry = datasets.get(reference_dataset)
     if not dataset_entry:
@@ -639,21 +579,15 @@ def collect_strong_scaling(
     # For each version, sweep through several CUDA block sizes by setting
     # KLT_THREADS_PER_BLOCK and measure how runtime changes. This isolates how
     # the kernel reacts to different launch configurations.
-    log(
-        f"Collecting strong scaling data on {dataset_path} for versions {versions} "
-        f"across blocks {block_sizes} with {iterations} iteration(s)"
-    )
     scaling = {"dataset": dataset_path.name, "block_sizes": list(block_sizes), "results": {}}
     for version in versions:
         version_dir = version_dirs[version]
         gpu_binary = version_dir / "example3_gpu"
         if not gpu_binary.exists():
-            log(f"  Skipping {version} (no GPU binary)")
             continue
         version_results = []
         for block in block_sizes:
             env = {"KLT_THREADS_PER_BLOCK": str(block)}
-            log(f"    Running {version} with block {block}")
             run_info = collect_runs(gpu_binary, dataset_path, iterations, env)
             version_results.append(
                 {
@@ -676,7 +610,6 @@ def collect_strong_scaling(
 def compute_speedup_table(datasets: Dict, metas: Dict) -> None:
     # Augment each dataset entry with derived statistics so downstream plotting
     # code can access "best time per version" and speedup data in one place.
-    log("Computing speedup table for all datasets")
     for dataset, entry in datasets.items():
         results = entry["results"]
         best_times = aggregate_best_times(results)
@@ -713,35 +646,30 @@ def main() -> None:
     for version, vdir in version_dirs.items():
         if not vdir.exists():
             raise FileNotFoundError(f"Version directory {vdir} missing")
-        log(f"Building CPU target for {version}")
         if not args.dry_run:
             success, output = build_target(vdir, "example3")
             if not success:
                 raise RuntimeError(f"{version} CPU build failed:\n{trim_output(output)}")
         if (vdir / "convolve_gpu.cu").exists():
-            log(f"Building GPU target for {version}")
             if not args.dry_run:
                 success, output = build_target(vdir, "example3_gpu")
                 if not success:
                     raise RuntimeError(f"{version} GPU build failed:\n{trim_output(output)}")
         else:
-            log(f"No GPU sources found for {version}; GPU runs will be skipped")
+            log(f"[warn] No GPU sources found for {version}; GPU runs will be skipped")
 
     for dset_name, dset_path in datasets.items():
         dataset_entry = {"meta": metas[dset_name], "results": {}, "path": str(dset_path)}
-        log(f"Processing dataset {dset_name}")
         for version, vdir in version_dirs.items():
             results = {}
             cpu_binary = vdir / "example3"
             if cpu_binary.exists() and not args.dry_run:
-                log(f"  Running {version} CPU on {dset_name}")
                 cpu_info = collect_runs(cpu_binary, dset_path, args.iterations)
             else:
                 cpu_info = None
             results["cpu"] = cpu_info
             gpu_binary = vdir / "example3_gpu"
             if gpu_binary.exists() and not args.dry_run:
-                log(f"  Running {version} GPU on {dset_name}")
                 gpu_info = collect_runs(gpu_binary, dset_path, args.iterations)
             else:
                 gpu_info = None
@@ -753,7 +681,6 @@ def main() -> None:
 
     reference_dataset_path = datasets.get(args.reference_dataset)
     if reference_dataset_path and not args.dry_run:
-        log("Collecting strong scaling data")
         data["strong_scaling"] = collect_strong_scaling(
             reference_dataset_path,
             [v for v in args.versions if (version_dirs[v] / "example3_gpu").exists()],
@@ -765,7 +692,6 @@ def main() -> None:
         data["strong_scaling"] = {}
 
     if not args.dry_run:
-        log("Collecting hotspot data")
         hotspot_entries = {}
         for version in args.profile_versions:
             if version not in version_dirs:
