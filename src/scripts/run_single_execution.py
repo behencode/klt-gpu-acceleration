@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Tuple
 
@@ -131,7 +132,13 @@ def main() -> None:
 
     try:
         run_command(["make", target_name], version_dir, args.dry_run)
-        run_command([str(binary_path)], dataset_path, args.dry_run)
+        if args.dry_run:
+            run_command([str(binary_path)], dataset_path, True)
+        else:
+            start_time = time.perf_counter()
+            run_command([str(binary_path)], dataset_path, False)
+            elapsed = time.perf_counter() - start_time
+            print(f"[run-single] Binary execution time: {elapsed:.3f}s")
     except subprocess.CalledProcessError as exc:
         print(
             f"error: command {' '.join(map(str, exc.cmd))} failed with exit code {exc.returncode}",
